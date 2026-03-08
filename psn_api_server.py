@@ -34,16 +34,18 @@ log = logging.getLogger(__name__)
 #  CONFIGURACAO — edite aqui para testes locais
 #  Em producao (Railway) use variaveis de ambiente
 # ══════════════════════════════════════════════════════════
-NPSSO_LIST = [
-    os.environ.get("PSN_NPSSO_1", ""),   # conta 1
-    os.environ.get("PSN_NPSSO_2", ""),   # conta 2
-    os.environ.get("PSN_NPSSO_3", ""),   # conta 3
-]
-# Remove entradas vazias
-NPSSO_LIST = [n.strip() for n in NPSSO_LIST if n.strip()]
-
 PORT = int(os.environ.get("PORT", 5000))
 # ══════════════════════════════════════════════════════════
+
+def get_npsso_list():
+    """Le os NSSOs dinamicamente a cada requisicao para garantir que
+    as variaveis de ambiente do Railway sejam sempre lidas corretamente."""
+    candidates = [
+        os.environ.get("PSN_NPSSO_1", ""),
+        os.environ.get("PSN_NPSSO_2", ""),
+        os.environ.get("PSN_NPSSO_3", ""),
+    ]
+    return [n.strip() for n in candidates if n.strip()]
 
 app = Flask(__name__)
 CORS(app)
@@ -164,6 +166,7 @@ def get_trophies():
         return jsonify({"status": "error", "message": "NP_COMM_ID obrigatorio"}), 400
     if not final_date_str:
         return jsonify({"status": "error", "message": "Data final obrigatoria"}), 400
+    NPSSO_LIST = get_npsso_list()
     if not NPSSO_LIST:
         return jsonify({"status": "error", "message": "Nenhum NPSSO configurado no servidor"}), 500
 
@@ -279,10 +282,14 @@ def get_trophies():
 
 @app.route("/api/health", methods=["GET"])
 def health():
+    npsso_list = get_npsso_list()
+    # debug: mostra quais variaveis existem no ambiente
+    env_keys = [k for k in os.environ.keys() if "NPSSO" in k or "PSN" in k]
     return jsonify({
-        "status":         "ok",
-        "accounts_configured": len(NPSSO_LIST),
-        "accounts":       [f"conta_{i+1}: configurada" for i in range(len(NPSSO_LIST))],
+        "status":              "ok",
+        "accounts_configured": len(npsso_list),
+        "accounts":            [f"conta_{i+1}: configurada" for i in range(len(npsso_list))],
+        "env_vars_found":      env_keys,
     })
 
 
