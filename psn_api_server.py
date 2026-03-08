@@ -283,13 +283,23 @@ def get_trophies():
 @app.route("/api/health", methods=["GET"])
 def health():
     npsso_list = get_npsso_list()
-    # debug: mostra quais variaveis existem no ambiente
     env_keys = [k for k in os.environ.keys() if "NPSSO" in k or "PSN" in k]
     return jsonify({
         "status":              "ok",
         "accounts_configured": len(npsso_list),
         "accounts":            [f"conta_{i+1}: configurada" for i in range(len(npsso_list))],
         "env_vars_found":      env_keys,
+    })
+
+@app.route("/api/debug", methods=["GET"])
+def debug():
+    """Mostra todas as variaveis de ambiente (sem valores sensiveis)."""
+    all_keys = sorted(os.environ.keys())
+    psn_vars = {k: os.environ[k][:6] + "..." for k in all_keys if "PSN" in k or "NPSSO" in k}
+    return jsonify({
+        "all_env_keys": all_keys,
+        "psn_vars_preview": psn_vars,
+        "total_env_vars": len(all_keys),
     })
 
 
