@@ -164,16 +164,18 @@ def get_trophies():
         return jsonify({"status": "error", "message": "PSN username obrigatorio"}), 400
     if not np_comm_id:
         return jsonify({"status": "error", "message": "NP_COMM_ID obrigatorio"}), 400
-    if not final_date_str:
-        return jsonify({"status": "error", "message": "Data final obrigatoria"}), 400
+    # final_date e opcional — se vazio, usa original_date sem recalculo
+    use_recalc = bool(final_date_str)
+    final_date = None
+    if final_date_str:
+        try:
+            final_date = datetime.strptime(final_date_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return jsonify({"status": "error", "message": "Formato de data invalido. Use YYYY-MM-DD HH:MM:SS"}), 400
+
     NPSSO_LIST = get_npsso_list()
     if not NPSSO_LIST:
         return jsonify({"status": "error", "message": "Nenhum NPSSO configurado no servidor"}), 500
-
-    try:
-        final_date = datetime.strptime(final_date_str, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return jsonify({"status": "error", "message": "Formato de data invalido. Use YYYY-MM-DD HH:MM:SS"}), 400
 
     try:
         from psnawp_api.models.trophies.trophy_constants import PlatformType
@@ -257,10 +259,16 @@ def get_trophies():
             "message": "Nenhum trofeu desbloqueado encontrado neste perfil para este jogo."
         }), 404
 
-    # recalcula e ordena
+    # recalcula (se houver data final) ou usa datas originais
     earned_sorted = sorted(earned, key=lambda x: x["earned_date"])
-    recalculated  = recalculate(earned_sorted, final_date)
-    final_list    = sorted(recalculated, key=sort_key)
+
+    if use_recalc and final_date:
+        recalculated = recalculate(earned_sorted, final_date)
+    else:
+        # sem recalculo — new_date = original_date
+        recalculated = [{**t, "new_date": t["earned_date"], "diff_sec": None} for t in earned_sorted]
+
+    final_list = sorted(recalculated, key=sort_key)
 
     trophies_out = [{
         "trophy_id":     t["trophy_id"],
