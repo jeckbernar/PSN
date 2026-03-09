@@ -74,36 +74,32 @@ def get_earned_date(trophy_obj):
 def recalculate_dates(earned_trophies, final_date):
     """
     Recalcula as datas dos trofeus mantendo proporcao de intervalos.
-    O trofeu mais recente (ou platina) recebe a data final exata.
-    earned_trophies: lista de dicts com trophy_id, trophy_name, trophy_type, earned_date
-    final_date: datetime da data final desejada
+    O trofeu com a data mais recente (ou a platina, se houver) recebe
+    a data final exata. Os demais sao ajustados proporcionalmente.
+    Funciona para jogos com e sem platina.
     """
     if not earned_trophies:
         return []
 
-    # Separar platina (se houver) dos demais
-    platinum = [t for t in earned_trophies if t["trophy_type"].upper() == "PLATINUM"]
-    others   = [t for t in earned_trophies if t["trophy_type"].upper() != "PLATINUM"]
+    if len(earned_trophies) == 1:
+        # Apenas 1 trofeu — recebe a data final diretamente
+        return [{**earned_trophies[0], "new_date": final_date, "diff_sec": 0}]
 
-    # Ordenar outros por data crescente
-    others_sorted = sorted(others, key=lambda x: x["earned_date"])
+    # Ordenar todos por data crescente
+    all_sorted = sorted(earned_trophies, key=lambda x: x["earned_date"])
 
-    # O ultimo da lista recebe a data final (platina ou ultimo trofeu)
-    if platinum:
-        anchor = platinum[0]
-        to_recalc = others_sorted
+    # Determinar o "anchor" = trofeu que recebe a data final
+    # Prioridade: platina (se houver); senao, o trofeu ganho por ultimo
+    platinum_list = [t for t in all_sorted if t["trophy_type"].upper() == "PLATINUM"]
+    if platinum_list:
+        anchor = platinum_list[0]
+        to_recalc = [t for t in all_sorted if t is not anchor]
     else:
-        anchor = others_sorted[-1] if others_sorted else None
-        to_recalc = others_sorted[:-1] if len(others_sorted) > 1 else []
+        anchor = all_sorted[-1]
+        to_recalc = all_sorted[:-1]
 
-    if anchor is None:
-        return []
-
-    # Data maxima dos trofeus a recalcular (referencia para proporcao)
-    if to_recalc:
-        max_date = max(t["earned_date"] for t in to_recalc)
-    else:
-        max_date = final_date
+    # A data de referencia e a data do proprio anchor (o mais tardio)
+    max_date = anchor["earned_date"]
 
     result = []
     for t in to_recalc:
@@ -111,7 +107,7 @@ def recalculate_dates(earned_trophies, final_date):
         new_date = final_date - timedelta(seconds=diff_sec)
         result.append({**t, "new_date": new_date, "diff_sec": diff_sec})
 
-    # Anchor (platina ou ultimo) recebe a data final exata
+    # Anchor recebe a data final exata
     result.append({**anchor, "new_date": final_date, "diff_sec": 0})
 
     return result
@@ -208,6 +204,7 @@ def get_trophies():
     last_err_type = "error"
     last_err_msg  = "Todas as contas falharam."
 
+    log.info(f"Request: user={psn_username} game={np_comm_id} platform={platform_str} recalc={use_recalc}")
     for i, npsso in enumerate(NPSSO_LIST, 1):
         log.info(f"Conta {i}/{len(NPSSO_LIST)}: {psn_username} / {np_comm_id}")
         raw, err_type, err_msg = try_fetch_trophies(npsso, psn_username, np_comm_id, platform)
