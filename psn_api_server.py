@@ -88,10 +88,15 @@ def recalculate(sorted_dates, final_date):
     return result
 
 
-def sort_key(t):
-    """Platina primeiro, depois por trophy_id crescente."""
+def sort_key_for_response(t):
+    """Para a resposta: platina primeiro, depois por trophy_id crescente."""
     is_plat = t["trophy_type"].upper() == "PLATINUM"
-    return (0 if is_plat else 1, t["trophy_id"])
+    return (0 if is_plat else 1, t["trophy_id"] if t["trophy_id"] is not None else 9999)
+
+def sort_key_for_recalc(t):
+    """Para recalculate(): platina ÚLTIMO (é o trofeu final / mais tardio)."""
+    is_plat = t["trophy_type"].upper() == "PLATINUM"
+    return (1 if is_plat else 0, t["earned_date"] or datetime.min)
 
 
 def try_fetch_trophies(npsso, psn_username, np_comm_id, platform):
@@ -233,16 +238,28 @@ def get_trophies():
     # ── Processa trofeus ───────────────────────────────────
     trophy_list = []
     for t in trophies_raw:
-        earned_dt = (
-            getattr(t, "earned_date_time",   None) or
-            getattr(t, "earned_datetime",    None) or
-            getattr(t, "trophy_earned_date", None)
-        )
-        if earned_dt and hasattr(earned_dt, "tzinfo") and earned_dt.tzinfo:
-            earned_dt = earned_dt.astimezone().replace(tzinfo=None)
+        # psnawp 1.x usa vários atributos dependendo da versão — tentar todos
+        earned_dt = None
+        for attr in ("earned_date_time", "earned_datetime", "trophy_earned_date",
+                     "earned_date", "date_earned", "unlock_date"):
+            val = getattr(t, attr, None)
+            if val is not None:
+                earned_dt = val
+                break
+
+        # normalizar timezone
+        if earned_dt is not None:
+            try:
+                if hasattr(earned_dt, "tzinfo") and earned_dt.tzinfo:
+                    earned_dt = earned_dt.astimezone().replace(tzinfo=None)
+            except Exception:
+                earned_dt = None
 
         raw_type    = getattr(t, "trophy_type", None)
         trophy_type = raw_type.name if hasattr(raw_type, "name") else str(raw_type or "?")
+
+        # LOG: mostra o que foi encontrado para debug
+        log.info(f"  trophy {getattr(t, 'trophy_id','?')}: type={trophy_type}, earned_dt={earned_dt}, attrs={[a for a in dir(t) if not a.startswith('_')][:8]}")
 
         trophy_list.append({
             "trophy_id":   getattr(t, "trophy_id", None),
@@ -255,12 +272,14 @@ def get_trophies():
 
     if not earned:
         return jsonify({
-            "status":  "not_found",
+            "status":  "no_trophies",
             "message": "Nenhum trofeu desbloqueado encontrado neste perfil para este jogo."
-        }), 404
+        }), 200
 
     # recalcula (se houver data final) ou usa datas originais
-    earned_sorted = sorted(earned, key=lambda x: x["earned_date"])
+    # Para recalculate: platina no final, resto ordenado por data
+    earned_sorted = sorted(earned, key=sort_key_for_recalc)
+    log.info(f"Trofeus ganhos para recalculo: {len(earned_sorted)} (platinum last: {earned_sorted[-1]['trophy_type'] if earned_sorted else 'n/a'})")
 
     if use_recalc and final_date:
         recalculated = recalculate(earned_sorted, final_date)
@@ -268,7 +287,8 @@ def get_trophies():
         # sem recalculo — new_date = original_date
         recalculated = [{**t, "new_date": t["earned_date"], "diff_sec": None} for t in earned_sorted]
 
-    final_list = sorted(recalculated, key=sort_key)
+    # Para resposta: platina primeiro, resto por trophy_id
+    final_list = sorted(recalculated, key=sort_key_for_response)
 
     trophies_out = [{
         "trophy_id":     t["trophy_id"],
@@ -284,6 +304,50 @@ def get_trophies():
         "trophies": trophies_out,
         "total":    len(trophies_out),
     })
+
+
+# ── Debug Trophy endpoint ────────────────────────────────
+
+@app.route("/api/debug-trophy", methods=["POST"])
+def debug_trophy():
+    """Mostra atributos brutos do psnawp para debug de campos de data."""
+    data = request.get_json()
+    psn_username = (data.get("psn_username") or "").strip()
+    np_comm_id   = (data.get("np_comm_id")   or "").strip()
+    platform_str = (data.get("platform")     or "PS4").strip().upper()
+
+    try:
+        from psnawp_api import PSNAWP
+        from psnawp_api.models.trophies.trophy_constants import PlatformType
+    except ImportError:
+        return jsonify({"error": "psnawp not installed"}), 500
+
+    platform_map = {"PS3": PlatformType.PS3, "PS4": PlatformType.PS4, "PS5": PlatformType.PS5, "VITA": PlatformType.PS_VITA, "PSVITA": PlatformType.PS_VITA}
+    platform = platform_map.get(platform_str, PlatformType.PS4)
+
+    NPSSO_LIST = get_npsso_list()
+    if not NPSSO_LIST:
+        return jsonify({"error": "No NPSSO configured"}), 500
+
+    try:
+        psnawp = PSNAWP(NPSSO_LIST[0])
+        user = psnawp.user(online_id=psn_username)
+        trophies_raw = list(user.trophies(np_communication_id=np_comm_id, platform=platform, include_metadata=True))
+        debug_out = []
+        for t in trophies_raw[:5]:  # primeiros 5 apenas
+            attrs = {}
+            for attr in ["trophy_id","trophy_name","trophy_type","earned_date_time","earned_datetime",
+                         "trophy_earned_date","earned_date","date_earned","unlock_date"]:
+                val = getattr(t, attr, "__NOT_FOUND__")
+                if val != "__NOT_FOUND__":
+                    attrs[attr] = str(val)
+            # também mostrar todos atributos não privados
+            all_attrs = [a for a in dir(t) if not a.startswith("_")]
+            attrs["__all_attrs__"] = all_attrs
+            debug_out.append(attrs)
+        return jsonify({"status": "ok", "count": len(trophies_raw), "sample": debug_out})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # ── Health check ──────────────────────────────────────────
