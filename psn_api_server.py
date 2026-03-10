@@ -456,7 +456,7 @@ def mp_create():
             "excluded_payment_types": [],
             "installments": 1,
         },
-        "statement_descriptor": "GAMESJSB",
+        "statement_descriptor": "UNLOCKTROPHIES",
         "expires": False,
         "metadata": {"order_id": order_id},
     }
@@ -479,7 +479,7 @@ def mp_create():
         try:
             pix_payment = mp_api("POST", "/v1/payments", {
                 "transaction_amount": total,
-                "description":        f"Pedido #{order_id} - GameJSB",
+                "description":        "UnlockTrophies - Servicos de Trofeus",
                 "payment_method_id":  "pix",
                 "payer":              {"email": cust_email},
                 "external_reference": order_id,
