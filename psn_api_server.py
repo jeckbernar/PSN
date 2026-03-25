@@ -2,7 +2,7 @@
 PSN Trophy API Server v4
 ========================
 Busca os trofeus DESBLOQUEADOS de um usuario para um jogo especifico.
-Busca grupo por grupo (default + DLCs) para garantir trophy_group_id correto.
+Retorna trophy_id sequencial global (igual ao banco) — sem segmentacao por grupo.
 """
 
 from flask import Flask, request, jsonify
@@ -94,124 +94,12 @@ def recalculate_dates(earned_trophies, final_date):
     return result
 
 
-def normalize_group(raw):
-    """Normaliza o trophy_group_id para string lowercase: 'default', '001', '002'..."""
-    if raw is None:
-        return "default"
-    s = str(raw).strip().lower()
-    if s in ("", "none", "null"):
-        return "default"
-    # psnawp pode retornar o enum como "TrophyGroupId.DEFAULT" ou "DEFAULT"
-    if "default" in s:
-        return "default"
-    # Extrai só o numero se vier como "001", "1", "TrophyGroupId.001" etc.
-    import re
-    m = re.search(r'(\d+)', s)
-    if m:
-        return m.group(1).zfill(3)   # "1" -> "001", "2" -> "002"
-    return s
-
-
-def fetch_trophies_by_group(user, np_comm_id, platform):
-    """
-    Busca troféus grupo por grupo para garantir que trophy_group_id seja correto.
-    Retorna lista de dicts com trophy_id, trophy_group_id, trophy_type, trophy_name, earned_date.
-    """
-    earned_list = []
-
-    # ── 1. Buscar grupos de troféus disponíveis para o jogo ───────────────────
-    try:
-        trophy_groups = list(user.trophy_groups_summary(
-            np_communication_id=np_comm_id,
-            platform=platform,
-        ))
-        group_ids = []
-        for g in trophy_groups:
-            raw_gid = getattr(g, "trophy_group_id", None)
-            gid = normalize_group(raw_gid)
-            group_ids.append(gid)
-        log.info(f"  Grupos encontrados: {group_ids}")
-    except Exception as e:
-        log.warning(f"  trophy_groups_summary falhou ({e}) — usando fallback grupo único")
-        group_ids = None   # fallback abaixo
-
-    # ── 2. Se conseguiu os grupos, busca cada um separadamente ────────────────
-    if group_ids:
-        from psnawp_api.models.trophies.trophy_constants import TrophyGroupId
-        for gid in group_ids:
-            try:
-                # Converte string para o enum/valor que a psnawp aceita
-                if gid == "default":
-                    group_param = TrophyGroupId.DEFAULT
-                else:
-                    group_param = gid   # "001", "002" — psnawp aceita string direta
-                
-                trophies_raw = list(user.trophies(
-                    np_communication_id=np_comm_id,
-                    platform=platform,
-                    include_metadata=True,
-                    trophy_group_id=group_param,
-                ))
-                log.info(f"  Grupo {gid}: {len(trophies_raw)} troféus brutos")
-
-                for t in trophies_raw:
-                    earned_dt = get_earned_date(t)
-                    if earned_dt is None:
-                        continue
-                    raw_type    = getattr(t, "trophy_type", None)
-                    trophy_type = raw_type.name if hasattr(raw_type, "name") else str(raw_type or "BRONZE")
-                    trophy_id   = getattr(t, "trophy_id", None)
-                    trophy_name = getattr(t, "trophy_name", None) or f"#{trophy_id}"
-                    earned_list.append({
-                        "trophy_id":       trophy_id,
-                        "trophy_name":     trophy_name,
-                        "trophy_type":     trophy_type,
-                        "trophy_group_id": gid,        # ← grupo garantido
-                        "earned_date":     earned_dt,
-                    })
-            except Exception as e:
-                log.warning(f"  Erro ao buscar grupo {gid}: {e}")
-                continue
-        
-        if earned_list:
-            return earned_list, None, None
-
-    # ── 3. Fallback: busca todos de uma vez (sem filtro de grupo) ─────────────
-    log.info("  Fallback: buscando todos os trofeus sem filtro de grupo")
-    try:
-        trophies_raw = list(user.trophies(
-            np_communication_id=np_comm_id,
-            platform=platform,
-            include_metadata=True,
-        ))
-        log.info(f"  Fallback: {len(trophies_raw)} troféus brutos")
-        for t in trophies_raw:
-            earned_dt = get_earned_date(t)
-            if earned_dt is None:
-                continue
-            raw_type    = getattr(t, "trophy_type", None)
-            trophy_type = raw_type.name if hasattr(raw_type, "name") else str(raw_type or "BRONZE")
-            trophy_id   = getattr(t, "trophy_id", None)
-            trophy_name = getattr(t, "trophy_name", None) or f"#{trophy_id}"
-
-            # Tenta extrair group_id do objeto mesmo no fallback
-            raw_group = getattr(t, "trophy_group_id", None)
-            gid = normalize_group(raw_group)
-
-            earned_list.append({
-                "trophy_id":       trophy_id,
-                "trophy_name":     trophy_name,
-                "trophy_type":     trophy_type,
-                "trophy_group_id": gid,
-                "earned_date":     earned_dt,
-            })
-        return earned_list, None, None
-    except Exception as e:
-        err_type = classify_error(str(e))
-        return None, err_type, str(e)
-
-
 def try_fetch_trophies(npsso, psn_username, np_comm_id, platform):
+    """
+    Busca todos os trofeus do jogo de uma vez (sem filtro de grupo).
+    A psnawp retorna trophy_id sequencial global — identico ao banco.
+    Ex: base(0-40) + DLC001(41-48) + DLC002(49-52) + ... = 0,1,2,...62
+    """
     try:
         from psnawp_api import PSNAWP
         psnawp = PSNAWP(npsso)
@@ -230,7 +118,44 @@ def try_fetch_trophies(npsso, psn_username, np_comm_id, platform):
             err_type = "not_found"
         return None, err_type, str(e)
 
-    return fetch_trophies_by_group(user, np_comm_id, platform)
+    try:
+        # Busca TODOS os trofeus do jogo sem filtro de grupo
+        # trophy_id retornado e sequencial global: 0,1,2,...N (igual ao banco)
+        trophies_raw = list(user.trophies(
+            np_communication_id=np_comm_id,
+            platform=platform,
+            include_metadata=True,
+        ))
+        log.info(f"  Total trofeus do jogo: {len(trophies_raw)}")
+
+        earned_list = []
+        for t in trophies_raw:
+            earned_dt = get_earned_date(t)
+            if earned_dt is None:
+                continue  # nao desbloqueado
+
+            raw_type    = getattr(t, "trophy_type", None)
+            trophy_type = raw_type.name if hasattr(raw_type, "name") else str(raw_type or "BRONZE")
+            trophy_id   = getattr(t, "trophy_id", None)
+            trophy_name = getattr(t, "trophy_name", None) or f"#{trophy_id}"
+
+            earned_list.append({
+                "trophy_id":   trophy_id,   # sequencial global: 0..N
+                "trophy_name": trophy_name,
+                "trophy_type": trophy_type,
+                "earned_date": earned_dt,
+            })
+
+        log.info(f"  Desbloqueados: {len(earned_list)} de {len(trophies_raw)}")
+        for t in earned_list:
+            log.info(f"    id={t['trophy_id']} | {t['trophy_name'][:40]}")
+
+        return earned_list, None, None
+
+    except Exception as e:
+        err_type = classify_error(str(e))
+        log.warning(f"  Busca trofeus falhou ({err_type}): {type(e).__name__}: {e}")
+        return None, err_type, str(e)
 
 
 @app.route("/api/trophies", methods=["POST"])
@@ -285,7 +210,7 @@ def get_trophies():
 
         if err_type is None:
             earned_list = result
-            log.info(f"Conta {i} OK — {len(earned_list)} trofeus desbloqueados")
+            log.info(f"Conta {i} OK")
             break
 
         last_err_type = err_type
@@ -312,11 +237,6 @@ def get_trophies():
             "message": msg_map.get(last_err_type, last_err_msg),
         }), http_map.get(last_err_type, 500)
 
-    log.info(f"Total desbloqueados: {len(earned_list)}")
-    # Log de cada trofeu para debug
-    for t in earned_list:
-        log.info(f"  group={t['trophy_group_id']} id={t['trophy_id']} name={t['trophy_name'][:30]}")
-
     if not earned_list:
         return jsonify({
             "status":  "no_trophies",
@@ -329,13 +249,12 @@ def get_trophies():
         processed = [{**t, "new_date": t["earned_date"], "diff_sec": None} for t in earned_list]
 
     trophies_out = [{
-        "trophy_id":       t["trophy_id"],
-        "trophy_group_id": t["trophy_group_id"],
-        "trophy_name":     t["trophy_name"],
-        "trophy_type":     t["trophy_type"],
-        "new_date":        fmt_dt(t.get("new_date")),
-        "original_date":   fmt_dt(t["earned_date"]),
-        "diff_sec":        t.get("diff_sec"),
+        "trophy_id":     t["trophy_id"],     # sequencial global — match direto com banco
+        "trophy_name":   t["trophy_name"],
+        "trophy_type":   t["trophy_type"],
+        "new_date":      fmt_dt(t.get("new_date")),
+        "original_date": fmt_dt(t["earned_date"]),
+        "diff_sec":      t.get("diff_sec"),
     } for t in processed]
 
     return jsonify({
@@ -367,15 +286,9 @@ def supabase_update_order(order_id, patch):
     try:
         req_url = f"{url}/rest/v1/tb_orders?id=eq.{order_id}"
         body = json.dumps(patch).encode()
-        req = urllib.request.Request(
-            req_url, data=body, method="PATCH",
-            headers={
-                "apikey": key,
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            }
-        )
+        req = urllib.request.Request(req_url, data=body, method="PATCH",
+            headers={"apikey": key, "Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json", "Prefer": "return=minimal"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             log.info(f"Supabase update order {order_id}: {resp.status}")
             return True
@@ -390,14 +303,9 @@ def mp_api(method, path, body=None):
         raise ValueError("MP_ACCESS_TOKEN nao configurado")
     url = f"https://api.mercadopago.com{path}"
     data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "X-Idempotency-Key": str(id(body)) if body else "nokey",
-        }
-    )
+    req = urllib.request.Request(url, data=data, method=method,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "X-Idempotency-Key": str(id(body)) if body else "nokey"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
 
@@ -405,63 +313,44 @@ def mp_api(method, path, body=None):
 @app.route("/api/payment/mp/create", methods=["POST"])
 def mp_create():
     data = request.get_json() or {}
-    order_id    = str(data.get("order_id", ""))
-    total       = float(data.get("total", 0))
-    currency    = str(data.get("currency", "BRL"))
-    cust_name   = str(data.get("customer_name", "Cliente"))
-    cust_email  = str(data.get("customer_email", "cliente@email.com"))
-    items_in    = data.get("items", [])
-    app_url     = get_env("APP_URL", "https://example.com")
-
+    order_id = str(data.get("order_id", "")); total = float(data.get("total", 0))
+    currency = str(data.get("currency", "BRL")); cust_name = str(data.get("customer_name", "Cliente"))
+    cust_email = str(data.get("customer_email", "cliente@email.com"))
+    items_in = data.get("items", []); app_url = get_env("APP_URL", "https://example.com")
     if not order_id or total <= 0:
         return jsonify({"error": "order_id e total sao obrigatorios"}), 400
-
-    if items_in:
-        mp_items = [{"id": str(it.get("game_name","item"))[:50], "title": str(it.get("game_name","Trophy Service"))[:256],
-                     "description": str(it.get("item_type","service"))[:256], "quantity": 1,
-                     "unit_price": float(it.get("price", total)), "currency_id": currency} for it in items_in]
-    else:
-        mp_items = [{"id": order_id, "title": "Trophy Service", "quantity": 1, "unit_price": total, "currency_id": currency}]
-
-    preference_body = {
-        "items": mp_items, "payer": {"name": cust_name, "email": cust_email},
+    mp_items = [{"id": str(it.get("game_name","item"))[:50], "title": str(it.get("game_name","Trophy Service"))[:256],
+                 "description": str(it.get("item_type","service"))[:256], "quantity": 1,
+                 "unit_price": float(it.get("price", total)), "currency_id": currency} for it in items_in] if items_in \
+              else [{"id": order_id, "title": "Trophy Service", "quantity": 1, "unit_price": total, "currency_id": currency}]
+    preference_body = {"items": mp_items, "payer": {"name": cust_name, "email": cust_email},
         "external_reference": order_id, "notification_url": f"{app_url}/api/webhook/mp",
         "back_urls": {"success": f"{app_url}/api/payment/mp/return?status=approved&order={order_id}",
                       "failure": f"{app_url}/api/payment/mp/return?status=failure&order={order_id}",
                       "pending": f"{app_url}/api/payment/mp/return?status=pending&order={order_id}"},
         "auto_return": "approved", "payment_methods": {"excluded_payment_types": [], "installments": 1},
-        "statement_descriptor": "UNLOCKTROPHIES", "expires": False, "metadata": {"order_id": order_id},
-    }
-
+        "statement_descriptor": "UNLOCKTROPHIES", "expires": False, "metadata": {"order_id": order_id}}
     try:
         pref = mp_api("POST", "/checkout/preferences", preference_body)
     except Exception as e:
         return jsonify({"error": f"Mercado Pago erro: {str(e)}"}), 502
-
-    preference_id = pref.get("id")
-    init_point    = pref.get("init_point")
-    sandbox_init  = pref.get("sandbox_init_point")
+    preference_id = pref.get("id"); init_point = pref.get("init_point"); sandbox_init = pref.get("sandbox_init_point")
     pix_qr = pix_payload = pix_id = None
-
     if currency == "BRL":
         try:
-            pix_payment = mp_api("POST", "/v1/payments", {
-                "transaction_amount": total, "description": "UnlockTrophies - Servicos de Trofeus",
-                "payment_method_id": "pix", "payer": {"email": cust_email},
-                "external_reference": order_id, "notification_url": f"{app_url}/api/webhook/mp",
-            })
-            pix_id      = pix_payment.get("id")
-            pix_data    = (pix_payment.get("point_of_interaction") or {}).get("transaction_data") or {}
-            pix_qr      = pix_data.get("qr_code_base64")
-            pix_payload = pix_data.get("qr_code")
+            pix_payment = mp_api("POST", "/v1/payments", {"transaction_amount": total,
+                "description": "UnlockTrophies - Servicos de Trofeus", "payment_method_id": "pix",
+                "payer": {"email": cust_email}, "external_reference": order_id,
+                "notification_url": f"{app_url}/api/webhook/mp"})
+            pix_id = pix_payment.get("id")
+            pix_data = (pix_payment.get("point_of_interaction") or {}).get("transaction_data") or {}
+            pix_qr = pix_data.get("qr_code_base64"); pix_payload = pix_data.get("qr_code")
         except Exception as e:
             log.warning(f"PIX direto falhou: {e}")
-
     if pix_id:
         supabase_update_order(order_id, {"payment_method": "pix_mp", "payment_id": str(pix_id), "status": "pending"})
     else:
         supabase_update_order(order_id, {"payment_method": "mercadopago", "payment_id": preference_id, "status": "pending"})
-
     return jsonify({"preference_id": preference_id, "init_point": init_point,
                     "sandbox_init": sandbox_init, "pix_id": pix_id, "pix_qr": pix_qr, "pix_payload": pix_payload})
 
@@ -470,8 +359,7 @@ def mp_create():
 def mp_status(payment_id):
     try:
         result = mp_api("GET", f"/v1/payments/{payment_id}")
-        status = result.get("status")
-        order_id = result.get("external_reference", "")
+        status = result.get("status"); order_id = result.get("external_reference", "")
         if status == "approved" and order_id:
             supabase_update_order(order_id, {"status": "processing", "payment_status": "paid"})
         return jsonify({"payment_id": payment_id, "status": status,
@@ -493,141 +381,155 @@ def mp_return():
 def webhook_mp():
     secret = get_env("MP_WEBHOOK_SECRET")
     if secret:
-        x_signature=request.headers.get("x-signature",""); x_request_id=request.headers.get("x-request-id",""); data_id=request.args.get("data.id","")
-        if x_signature:
-            ts=v1=""
-            for part in x_signature.split(","):
-                k,_,v=part.partition("=")
+        x_sig = request.headers.get("x-signature",""); x_rid = request.headers.get("x-request-id",""); data_id = request.args.get("data.id","")
+        if x_sig:
+            ts = v1 = ""
+            for part in x_sig.split(","):
+                k,_,v = part.partition("=")
                 if k.strip()=="ts": ts=v.strip()
                 if k.strip()=="v1": v1=v.strip()
-            manifest=f"id:{data_id};request-id:{x_request_id};ts:{ts};"
-            expected=hmac.new(secret.encode(),manifest.encode(),hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(expected,v1):
-                return jsonify({"error":"invalid signature"}),401
-    payload=request.get_json(silent=True) or {}; action=payload.get("action",""); obj_id=str((payload.get("data") or {}).get("id",""))
+            manifest = f"id:{data_id};request-id:{x_rid};ts:{ts};"
+            expected = hmac.new(secret.encode(), manifest.encode(), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(expected, v1):
+                return jsonify({"error": "invalid signature"}), 401
+    payload = request.get_json(silent=True) or {}
+    action = payload.get("action",""); obj_id = str((payload.get("data") or {}).get("id",""))
     if action in ("payment.created","payment.updated") and obj_id:
         try:
-            result=mp_api("GET",f"/v1/payments/{obj_id}"); status=result.get("status"); order_id=result.get("external_reference","")
-            if status=="approved" and order_id:
-                supabase_update_order(order_id,{"status":"processing","payment_status":"paid","payment_id":obj_id})
+            result = mp_api("GET", f"/v1/payments/{obj_id}")
+            status = result.get("status"); order_id = result.get("external_reference","")
+            if status == "approved" and order_id:
+                supabase_update_order(order_id, {"status":"processing","payment_status":"paid","payment_id":obj_id})
         except Exception as e:
             log.error(f"Webhook MP erro: {e}")
-    return jsonify({"received":True}),200
+    return jsonify({"received": True}), 200
 
 
 def paypal_base_url():
     return "https://api-m.sandbox.paypal.com" if get_env("PAYPAL_ENV","live")=="sandbox" else "https://api-m.paypal.com"
 
-_paypal_token_cache={"token":None,"expires":0}
+_paypal_token_cache = {"token": None, "expires": 0}
 
 def paypal_get_token():
     import time
-    now=time.time()
-    if _paypal_token_cache["token"] and now<_paypal_token_cache["expires"]-60:
+    now = time.time()
+    if _paypal_token_cache["token"] and now < _paypal_token_cache["expires"] - 60:
         return _paypal_token_cache["token"]
-    client_id=get_env("PAYPAL_CLIENT_ID"); client_secret=get_env("PAYPAL_CLIENT_SECRET")
+    client_id = get_env("PAYPAL_CLIENT_ID"); client_secret = get_env("PAYPAL_CLIENT_SECRET")
     if not client_id or not client_secret: raise ValueError("PAYPAL credentials nao configurados")
-    creds=f"{client_id}:{client_secret}".encode(); b64=__import__("base64").b64encode(creds).decode()
-    body=urllib.parse.urlencode({"grant_type":"client_credentials"}).encode()
-    req=urllib.request.Request(f"{paypal_base_url()}/v1/oauth2/token",data=body,method="POST",
-        headers={"Authorization":f"Basic {b64}","Content-Type":"application/x-www-form-urlencoded"})
-    with urllib.request.urlopen(req,timeout=15) as resp: result=json.loads(resp.read())
-    _paypal_token_cache["token"]=result["access_token"]; _paypal_token_cache["expires"]=now+result.get("expires_in",3600)
+    creds = f"{client_id}:{client_secret}".encode()
+    b64 = __import__("base64").b64encode(creds).decode()
+    body = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
+    req = urllib.request.Request(f"{paypal_base_url()}/v1/oauth2/token", data=body, method="POST",
+          headers={"Authorization": f"Basic {b64}", "Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=15) as resp: result = json.loads(resp.read())
+    _paypal_token_cache["token"] = result["access_token"]
+    _paypal_token_cache["expires"] = now + result.get("expires_in", 3600)
     return _paypal_token_cache["token"]
 
-def paypal_api(method,path,body=None,token=None):
-    if token is None: token=paypal_get_token()
-    url=f"{paypal_base_url()}{path}"; data=json.dumps(body).encode() if body else None
-    req=urllib.request.Request(url,data=data,method=method,
-        headers={"Authorization":f"Bearer {token}","Content-Type":"application/json","PayPal-Request-Id":str(id(body) if body else path)})
-    with urllib.request.urlopen(req,timeout=15) as resp: return json.loads(resp.read())
+def paypal_api(method, path, body=None, token=None):
+    if token is None: token = paypal_get_token()
+    url = f"{paypal_base_url()}{path}"; data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, method=method,
+          headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                   "PayPal-Request-Id": str(id(body) if body else path)})
+    with urllib.request.urlopen(req, timeout=15) as resp: return json.loads(resp.read())
 
 
-@app.route("/api/payment/paypal/create",methods=["POST"])
+@app.route("/api/payment/paypal/create", methods=["POST"])
 def paypal_create():
-    data=request.get_json() or {}; order_id=str(data.get("order_id","")); total=float(data.get("total",0))
-    currency=str(data.get("currency","USD")); cust_email=str(data.get("customer_email","")); app_url=get_env("APP_URL","https://example.com")
-    if currency=="BRL": currency="USD"; total=round(total*float(get_env("BRL_TO_USD_RATE","0.19")),2)
-    if not order_id or total<=0: return jsonify({"error":"order_id e total sao obrigatorios"}),400
-    paypal_body={"intent":"CAPTURE","purchase_units":[{"reference_id":order_id,"custom_id":order_id,
+    data = request.get_json() or {}
+    order_id = str(data.get("order_id","")); total = float(data.get("total",0))
+    currency = str(data.get("currency","USD")); cust_email = str(data.get("customer_email",""))
+    app_url = get_env("APP_URL","https://example.com")
+    if currency == "BRL": currency = "USD"; total = round(total * float(get_env("BRL_TO_USD_RATE","0.19")), 2)
+    if not order_id or total <= 0: return jsonify({"error": "order_id e total sao obrigatorios"}), 400
+    paypal_body = {"intent":"CAPTURE","purchase_units":[{"reference_id":order_id,"custom_id":order_id,
         "description":f"GameJSB Trophy Service #{order_id}","amount":{"currency_code":currency,"value":f"{total:.2f}"}}],
         "payer":{"email_address":cust_email} if cust_email else {},
         "application_context":{"brand_name":"GameJSB","landing_page":"LOGIN","user_action":"PAY_NOW",
             "shipping_preference":"NO_SHIPPING","return_url":f"{app_url}/api/payment/paypal/capture",
             "cancel_url":f"{app_url}/api/payment/paypal/cancel"}}
     try:
-        result=paypal_api("POST","/v2/checkout/orders",paypal_body); pp_order_id=result.get("id")
-        approve_url=next((l["href"] for l in result.get("links",[]) if l.get("rel")=="approve"),None)
-    except Exception as e: return jsonify({"error":f"PayPal erro: {str(e)}"}),502
-    supabase_update_order(order_id,{"payment_method":"paypal","payment_id":pp_order_id,"status":"pending"})
+        result = paypal_api("POST", "/v2/checkout/orders", paypal_body)
+        pp_order_id = result.get("id")
+        approve_url = next((l["href"] for l in result.get("links",[]) if l.get("rel")=="approve"), None)
+    except Exception as e: return jsonify({"error": f"PayPal erro: {str(e)}"}), 502
+    supabase_update_order(order_id, {"payment_method":"paypal","payment_id":pp_order_id,"status":"pending"})
     return jsonify({"paypal_order_id":pp_order_id,"approve_url":approve_url,"currency":currency,"total":total})
 
 
-@app.route("/api/payment/paypal/capture",methods=["GET","POST"])
+@app.route("/api/payment/paypal/capture", methods=["GET","POST"])
 def paypal_capture():
-    if request.method=="GET": pp_order_id=request.args.get("token","")
-    else: pp_order_id=(request.get_json() or {}).get("paypal_order_id","")
-    if not pp_order_id: return jsonify({"error":"paypal_order_id obrigatorio"}),400
+    if request.method == "GET": pp_order_id = request.args.get("token","")
+    else: pp_order_id = (request.get_json() or {}).get("paypal_order_id","")
+    if not pp_order_id: return jsonify({"error":"paypal_order_id obrigatorio"}), 400
     try:
-        result=paypal_api("POST",f"/v2/checkout/orders/{pp_order_id}/capture"); status=result.get("status")
-        units=result.get("purchase_units",[{}]); order_id=(units[0].get("reference_id") or units[0].get("custom_id") or "")
-        paid=status=="COMPLETED"
-        if paid and order_id: supabase_update_order(order_id,{"status":"processing","payment_status":"paid","payment_id":pp_order_id})
-        if request.method=="GET":
-            frontend=get_env("FRONTEND_URL",get_env("APP_URL",""))
+        result = paypal_api("POST", f"/v2/checkout/orders/{pp_order_id}/capture")
+        status = result.get("status"); units = result.get("purchase_units",[{}])
+        order_id = units[0].get("reference_id") or units[0].get("custom_id","")
+        paid = status == "COMPLETED"
+        if paid and order_id:
+            supabase_update_order(order_id, {"status":"processing","payment_status":"paid","payment_id":pp_order_id})
+        if request.method == "GET":
+            frontend = get_env("FRONTEND_URL", get_env("APP_URL",""))
             return f"""<html><head><script>window.opener&&window.opener.postMessage({{type:"paypal_return",status:"{status}",order_id:"{order_id}"}},"*");setTimeout(()=>window.close(),500);window.location="{frontend}?payment_status={'approved' if paid else 'pending'}&order={order_id}";</script></head><body>Processando...</body></html>"""
         return jsonify({"status":status,"paid":paid,"order_id":order_id})
-    except Exception as e: return jsonify({"error":str(e)}),502
+    except Exception as e: return jsonify({"error":str(e)}), 502
 
 
-@app.route("/api/payment/paypal/status/<pp_order_id>",methods=["GET"])
+@app.route("/api/payment/paypal/status/<pp_order_id>", methods=["GET"])
 def paypal_status(pp_order_id):
     try:
-        result=paypal_api("GET",f"/v2/checkout/orders/{pp_order_id}"); status=result.get("status")
-        units=result.get("purchase_units",[{}]); order_id=units[0].get("reference_id","") or units[0].get("custom_id","")
-        paid=status=="COMPLETED"
-        if paid and order_id: supabase_update_order(order_id,{"status":"processing","payment_status":"paid"})
+        result = paypal_api("GET", f"/v2/checkout/orders/{pp_order_id}")
+        status = result.get("status"); units = result.get("purchase_units",[{}])
+        order_id = units[0].get("reference_id","") or units[0].get("custom_id","")
+        paid = status == "COMPLETED"
+        if paid and order_id: supabase_update_order(order_id, {"status":"processing","payment_status":"paid"})
         return jsonify({"paypal_order_id":pp_order_id,"status":status,"paid":paid,"order_id":order_id})
-    except Exception as e: return jsonify({"error":str(e)}),502
+    except Exception as e: return jsonify({"error":str(e)}), 502
 
 
-@app.route("/api/payment/paypal/cancel",methods=["GET"])
+@app.route("/api/payment/paypal/cancel", methods=["GET"])
 def paypal_cancel():
-    order_id=request.args.get("order",""); frontend=get_env("FRONTEND_URL",get_env("APP_URL",""))
+    order_id = request.args.get("order",""); frontend = get_env("FRONTEND_URL", get_env("APP_URL",""))
     return f"""<html><head><script>window.opener&&window.opener.postMessage({{type:"paypal_cancel",order_id:"{order_id}"}},"*");setTimeout(()=>window.close(),300);window.location="{frontend}?payment_status=cancelled&order={order_id}";</script></head><body>Cancelado.</body></html>"""
 
 
-@app.route("/api/webhook/paypal",methods=["POST"])
+@app.route("/api/webhook/paypal", methods=["POST"])
 def webhook_paypal():
-    payload=request.get_json(silent=True) or {}; event_type=payload.get("event_type",""); resource=payload.get("resource",{})
+    payload = request.get_json(silent=True) or {}
+    event_type = payload.get("event_type",""); resource = payload.get("resource",{})
     log.info(f"Webhook PayPal: {event_type}")
     if event_type in ("PAYMENT.CAPTURE.COMPLETED","CHECKOUT.ORDER.APPROVED"):
-        pp_order_id=resource.get("id",""); units=resource.get("purchase_units") or [{}]
-        order_id=(units[0].get("reference_id") or units[0].get("custom_id") or resource.get("custom_id",""))
+        pp_order_id = resource.get("id",""); units = resource.get("purchase_units") or [{}]
+        order_id = units[0].get("reference_id") or units[0].get("custom_id") or resource.get("custom_id","")
         if not order_id and pp_order_id:
             try:
-                details=paypal_api("GET",f"/v2/checkout/orders/{pp_order_id}"); units=details.get("purchase_units",[{}])
-                order_id=units[0].get("reference_id") or units[0].get("custom_id","")
+                details = paypal_api("GET", f"/v2/checkout/orders/{pp_order_id}")
+                units = details.get("purchase_units",[{}])
+                order_id = units[0].get("reference_id") or units[0].get("custom_id","")
             except: pass
-        if order_id: supabase_update_order(order_id,{"status":"processing","payment_status":"paid","payment_id":pp_order_id})
-    return jsonify({"received":True}),200
+        if order_id:
+            supabase_update_order(order_id, {"status":"processing","payment_status":"paid","payment_id":pp_order_id})
+    return jsonify({"received": True}), 200
 
 
-@app.route("/api/health",methods=["GET"])
+@app.route("/api/health", methods=["GET"])
 def health():
-    mp_ok=bool(get_env("MP_ACCESS_TOKEN")); pp_ok=bool(get_env("PAYPAL_CLIENT_ID") and get_env("PAYPAL_CLIENT_SECRET"))
+    mp_ok = bool(get_env("MP_ACCESS_TOKEN")); pp_ok = bool(get_env("PAYPAL_CLIENT_ID") and get_env("PAYPAL_CLIENT_SECRET"))
     return jsonify({"status":"ok","accounts_configured":len(get_npsso_list()),
         "mercadopago":"configured" if mp_ok else "not_configured",
         "paypal":"configured" if pp_ok else "not_configured",
         "supabase":"configured" if get_env("SUPABASE_URL") else "not_configured"})
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     print(f"\n{'='*50}\n  PSN Trophy API Server v4\n{'='*50}")
-    n=len(get_npsso_list())
+    n = len(get_npsso_list())
     print(f"\n{'✅' if n else '⚠️ '} {n} conta(s) PSN configurada(s)")
     print(f"{'✅' if get_env('MP_ACCESS_TOKEN') else '⚠️ '} Mercado Pago: {'OK' if get_env('MP_ACCESS_TOKEN') else 'NAO CONFIGURADO'}")
     print(f"{'✅' if get_env('PAYPAL_CLIENT_ID') else '⚠️ '} PayPal: {'OK' if get_env('PAYPAL_CLIENT_ID') else 'NAO CONFIGURADO'}")
     print(f"{'✅' if get_env('SUPABASE_URL') else '⚠️ '} Supabase: {'OK' if get_env('SUPABASE_URL') else 'NAO CONFIGURADO'}")
     print(f"\n🚀 http://localhost:{PORT}\n")
-    app.run(host="0.0.0.0",port=PORT,debug=False)
+    app.run(host="0.0.0.0", port=PORT, debug=False)
