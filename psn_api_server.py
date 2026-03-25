@@ -174,65 +174,17 @@ def try_fetch_trophies(npsso, psn_username, np_comm_id, platform):
 
     # 3. Buscar trofeus do jogo
     try:
-try:
-    all_trophies = []
-    seen_ids = set()
-
-    # pegar request builder interno do psnawp
-    rb = psnawp._request_builder
-
-    # endpoint real da PSN (trophy groups)
-    url = f"/trophy/v1/trophyTitles/{np_comm_id}/trophyGroups"
-
-    try:
-        resp = rb.get(url)
-        groups_data = resp.json()
-        group_ids = [g.get("trophyGroupId") for g in groups_data.get("trophyGroups", [])]
+        trophies_raw = list(user.trophies(
+            np_communication_id=np_comm_id,
+            platform=platform,
+            include_metadata=True,
+        ))
+        log.info(f"  Trofeus brutos: {len(trophies_raw)}")
+        return trophies_raw, None, None
     except Exception as e:
-        log.warning(f"Falha ao buscar trophy groups: {e}")
-        group_ids = ["default"]  # fallback
-
-    # garantir que default sempre existe
-    if "default" not in group_ids:
-        group_ids.insert(0, "default")
-
-    log.info(f"Groups encontrados: {group_ids}")
-
-    # buscar trofeus por group
-    for group in group_ids:
-        try:
-            trophies = list(user.trophies(
-                np_communication_id=np_comm_id,
-                platform=platform,
-                include_metadata=True,
-                group_id=group
-            ))
-
-            if not trophies:
-                continue
-
-            log.info(f"  Group {group}: {len(trophies)} trofeus")
-
-            for t in trophies:
-                tid = getattr(t, "trophy_id", None)
-                if tid not in seen_ids:
-                    seen_ids.add(tid)
-                    all_trophies.append(t)
-
-        except Exception as e:
-            log.warning(f"Erro no group {group}: {e}")
-            continue
-
-    if not all_trophies:
-        raise Exception("no trophies found in any group")
-
-    log.info(f"Total consolidado: {len(all_trophies)}")
-    return all_trophies, None, None
-
-except Exception as e:
-    err_type = classify_error(str(e))
-    log.warning(f"  Busca trofeus falhou ({err_type}): {type(e).__name__}: {e}")
-    return None, err_type, str(e)
+        err_type = classify_error(str(e))
+        log.warning(f"  Busca trofeus falhou ({err_type}): {type(e).__name__}: {e}")
+        return None, err_type, str(e)
 
 # ── Endpoint principal ────────────────────────────────────────────────────────
 
