@@ -94,7 +94,7 @@ def recalculate_dates(earned_trophies, final_date):
     return result
 
 
-def try_fetch_trophies(npsso, psn_username, np_comm_id, platform):
+def try_fetch_trophies(npsso, psn_username, np_comm_id, platform,trophy_group_id="all"):
     """
     Busca todos os trofeus do jogo de uma vez (sem filtro de grupo).
     A psnawp retorna trophy_id sequencial global — identico ao banco.
@@ -166,8 +166,9 @@ def get_trophies():
     np_comm_id     = (data.get("np_comm_id")   or "").strip()
     platform_str   = (data.get("platform")     or "PS4").strip().upper()
     final_date_str = (data.get("final_date")   or "").strip()
+    trophy_group_id = (data.get("trophy_group_id") or "all").strip()
 
-    if not psn_username:
+        if not psn_username:
         return jsonify({"status": "error", "message": "PSN username obrigatorio"}), 400
     if not np_comm_id:
         return jsonify({"status": "error", "message": "NP_COMM_ID obrigatorio"}), 400
@@ -206,7 +207,7 @@ def get_trophies():
 
     for i, npsso in enumerate(NPSSO_LIST, 1):
         log.info(f"Tentando conta {i}/{len(NPSSO_LIST)}...")
-        result, err_type, err_msg = try_fetch_trophies(npsso, psn_username, np_comm_id, platform)
+        result, err_type, err_msg = try_fetch_trophies(npsso, psn_username, np_comm_id, platform,trophy_group_id)
 
         if err_type is None:
             earned_list = result
