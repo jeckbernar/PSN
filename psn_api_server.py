@@ -118,14 +118,14 @@ def try_fetch_trophies(npsso, psn_username, np_comm_id, platform):
         return None, err_type, str(e)
 
     try:
-        from psnawp_api.models.trophies.trophy_constants import TrophyGroupId
+        # TrophyGroupId nao disponivel em psnawp 1.3.3
 
         # "all" retorna base + todos os grupos DLC em uma unica chamada
         trophies_raw = list(user.trophies(
             np_communication_id=np_comm_id,
             platform=platform,
             include_metadata=True,
-            trophy_group_id=TrophyGroupId.ALL,
+            trophy_group_id="all",
         ))
         log.info(f"  Total trofeus (all groups): {len(trophies_raw)}")
 
