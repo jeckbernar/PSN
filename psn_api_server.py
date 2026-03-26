@@ -2,7 +2,7 @@
 PSN Trophy API Server v4
 ========================
 Busca os trofeus DESBLOQUEADOS de um usuario para um jogo especifico.
-Retorna trophy_id sequencial global (igual ao banco) — sem segmentacao por grupo.
+Usa trophy_group_id="all" para retornar base + todos os DLCs.
 """
 
 from flask import Flask, request, jsonify
@@ -94,11 +94,10 @@ def recalculate_dates(earned_trophies, final_date):
     return result
 
 
-def try_fetch_trophies(npsso, psn_username, np_comm_id, platform,trophy_group_id="all"):
+def try_fetch_trophies(npsso, psn_username, np_comm_id, platform):
     """
-    Busca todos os trofeus do jogo de uma vez (sem filtro de grupo).
-    A psnawp retorna trophy_id sequencial global — identico ao banco.
-    Ex: base(0-40) + DLC001(41-48) + DLC002(49-52) + ... = 0,1,2,...62
+    Busca todos os trofeus (base + DLCs) usando trophy_group_id='all'.
+    trophy_id retornado e sequencial global: 0, 1, 2 ... N (identico ao banco).
     """
     try:
         from psnawp_api import PSNAWP
@@ -119,20 +118,22 @@ def try_fetch_trophies(npsso, psn_username, np_comm_id, platform,trophy_group_id
         return None, err_type, str(e)
 
     try:
-        # Busca TODOS os trofeus do jogo sem filtro de grupo
-        # trophy_id retornado e sequencial global: 0,1,2,...N (igual ao banco)
+        from psnawp_api.models.trophies.trophy_constants import TrophyGroupId
+
+        # "all" retorna base + todos os grupos DLC em uma unica chamada
         trophies_raw = list(user.trophies(
             np_communication_id=np_comm_id,
             platform=platform,
             include_metadata=True,
+            trophy_group_id=TrophyGroupId.ALL,
         ))
-        log.info(f"  Total trofeus do jogo: {len(trophies_raw)}")
+        log.info(f"  Total trofeus (all groups): {len(trophies_raw)}")
 
         earned_list = []
         for t in trophies_raw:
             earned_dt = get_earned_date(t)
             if earned_dt is None:
-                continue  # nao desbloqueado
+                continue
 
             raw_type    = getattr(t, "trophy_type", None)
             trophy_type = raw_type.name if hasattr(raw_type, "name") else str(raw_type or "BRONZE")
@@ -140,7 +141,7 @@ def try_fetch_trophies(npsso, psn_username, np_comm_id, platform,trophy_group_id
             trophy_name = getattr(t, "trophy_name", None) or f"#{trophy_id}"
 
             earned_list.append({
-                "trophy_id":   trophy_id,   # sequencial global: 0..N
+                "trophy_id":   trophy_id,
                 "trophy_name": trophy_name,
                 "trophy_type": trophy_type,
                 "earned_date": earned_dt,
@@ -166,9 +167,8 @@ def get_trophies():
     np_comm_id     = (data.get("np_comm_id")   or "").strip()
     platform_str   = (data.get("platform")     or "PS4").strip().upper()
     final_date_str = (data.get("final_date")   or "").strip()
-    trophy_group_id = (data.get("trophy_group_id") or "all").strip()
 
-        if not psn_username:
+    if not psn_username:
         return jsonify({"status": "error", "message": "PSN username obrigatorio"}), 400
     if not np_comm_id:
         return jsonify({"status": "error", "message": "NP_COMM_ID obrigatorio"}), 400
@@ -207,7 +207,7 @@ def get_trophies():
 
     for i, npsso in enumerate(NPSSO_LIST, 1):
         log.info(f"Tentando conta {i}/{len(NPSSO_LIST)}...")
-        result, err_type, err_msg = try_fetch_trophies(npsso, psn_username, np_comm_id, platform,trophy_group_id)
+        result, err_type, err_msg = try_fetch_trophies(npsso, psn_username, np_comm_id, platform)
 
         if err_type is None:
             earned_list = result
@@ -250,7 +250,7 @@ def get_trophies():
         processed = [{**t, "new_date": t["earned_date"], "diff_sec": None} for t in earned_list]
 
     trophies_out = [{
-        "trophy_id":     t["trophy_id"],     # sequencial global — match direto com banco
+        "trophy_id":     t["trophy_id"],
         "trophy_name":   t["trophy_name"],
         "trophy_type":   t["trophy_type"],
         "new_date":      fmt_dt(t.get("new_date")),
