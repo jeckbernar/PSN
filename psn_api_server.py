@@ -519,22 +519,6 @@ def webhook_paypal():
     return jsonify({"received": True}), 200
 
 
-# Inicia self-ping ao rodar via gunicorn também
-def start_ping_thread():
-    t = threading.Thread(target=self_ping, daemon=True)
-    t.start()
-
-# Executa ao importar o módulo (gunicorn importa app diretamente)
-_ping_started = False
-def _init_ping():
-    global _ping_started
-    if not _ping_started:
-        _ping_started = True
-        start_ping_thread()
-
-_init_ping()
-
-
 @app.route("/api/health", methods=["GET"])
 def health():
     mp_ok = bool(get_env("MP_ACCESS_TOKEN")); pp_ok = bool(get_env("PAYPAL_CLIENT_ID") and get_env("PAYPAL_CLIENT_SECRET"))
@@ -564,6 +548,18 @@ def self_ping():
             log.warning(f"AUTO-PING erro: {e}")
         time.sleep(600)  # 10 minutos
 
+
+# Inicia self-ping ao importar (gunicorn não passa pelo __main__)
+_ping_started = False
+def _start_ping_once():
+    global _ping_started
+    if not _ping_started:
+        _ping_started = True
+        t = threading.Thread(target=self_ping, daemon=True)
+        t.start()
+        log.info("AUTO-PING thread iniciada")
+
+_start_ping_once()
 
 if __name__ == "__main__":
     print(f"\n{'='*50}\n  PSN Trophy API Server v4\n{'='*50}")
