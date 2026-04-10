@@ -10,6 +10,9 @@ from flask_cors import CORS
 from datetime import datetime, timedelta
 import os
 import logging
+import threading
+import time
+import urllib.request as urllib2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -516,6 +519,22 @@ def webhook_paypal():
     return jsonify({"received": True}), 200
 
 
+# Inicia self-ping ao rodar via gunicorn também
+def start_ping_thread():
+    t = threading.Thread(target=self_ping, daemon=True)
+    t.start()
+
+# Executa ao importar o módulo (gunicorn importa app diretamente)
+_ping_started = False
+def _init_ping():
+    global _ping_started
+    if not _ping_started:
+        _ping_started = True
+        start_ping_thread()
+
+_init_ping()
+
+
 @app.route("/api/health", methods=["GET"])
 def health():
     mp_ok = bool(get_env("MP_ACCESS_TOKEN")); pp_ok = bool(get_env("PAYPAL_CLIENT_ID") and get_env("PAYPAL_CLIENT_SECRET"))
@@ -523,6 +542,27 @@ def health():
         "mercadopago":"configured" if mp_ok else "not_configured",
         "paypal":"configured" if pp_ok else "not_configured",
         "supabase":"configured" if get_env("SUPABASE_URL") else "not_configured"})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SELF-PING — mantém o serviço acordado no Render (free tier)
+# ══════════════════════════════════════════════════════════════════════════════
+def self_ping():
+    """Faz ping no próprio servidor a cada 10 minutos para evitar sleep no Render."""
+    time.sleep(30)  # espera 30s após startup antes de começar
+    app_url = get_env("APP_URL", "")
+    if not app_url:
+        log.info("AUTO-PING: APP_URL não configurado, ping desativado.")
+        return
+    ping_url = f"{app_url}/api/health"
+    while True:
+        try:
+            req = urllib2.Request(ping_url, headers={"User-Agent": "self-ping/1.0"})
+            with urllib2.urlopen(req, timeout=10) as r:
+                log.info(f"AUTO-PING: {r.status} OK")
+        except Exception as e:
+            log.warning(f"AUTO-PING erro: {e}")
+        time.sleep(600)  # 10 minutos
 
 
 if __name__ == "__main__":
@@ -533,4 +573,7 @@ if __name__ == "__main__":
     print(f"{'✅' if get_env('PAYPAL_CLIENT_ID') else '⚠️ '} PayPal: {'OK' if get_env('PAYPAL_CLIENT_ID') else 'NAO CONFIGURADO'}")
     print(f"{'✅' if get_env('SUPABASE_URL') else '⚠️ '} Supabase: {'OK' if get_env('SUPABASE_URL') else 'NAO CONFIGURADO'}")
     print(f"\n🚀 http://localhost:{PORT}\n")
+    # Inicia thread de self-ping para evitar sleep no Render
+    ping_thread = threading.Thread(target=self_ping, daemon=True)
+    ping_thread.start()
     app.run(host="0.0.0.0", port=PORT, debug=False)
