@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: psn-trophy-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn psn_api_server:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: PSN_NPSSO_1
+        sync: false
+      - key: PSN_NPSSO_2
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: MP_ACCESS_TOKEN
+        sync: false
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: APP_URL
+        sync: false
